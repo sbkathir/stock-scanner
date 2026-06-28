@@ -6,9 +6,12 @@ from datetime import datetime, timedelta
 from typing import List, Set
 import json
 
-# ── CONFIG (loaded from environment / GitHub Secrets) ──────────────────────────
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
+TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+# How many days back to scan (default 5, override with env var DAYS_BACK)
+DAYS_BACK = int(os.environ.get("DAYS_BACK", "5"))
 
 TWITTER_ACCOUNTS = [
     "sunilgurjar01",
@@ -18,7 +21,6 @@ TWITTER_ACCOUNTS = [
     "chartnavigators",
 ]
 
-# Nitter public mirrors (fallback list)
 NITTER_INSTANCES = [
     "https://nitter.poast.org",
     "https://nitter.privacydev.net",
@@ -34,11 +36,6 @@ HEADERS = {
     )
 }
 
-# ── TICKER EXTRACTION ──────────────────────────────────────────────────────────
-# Matches $TICKER (1-5 uppercase letters) or plain NSE/BSE style e.g. RELIANCE, INFY
-TICKER_REGEX = re.compile(r'\$([A-Z]{1,10})|(?<!\w)([A-Z]{2,10})(?!\w)')
-
-# Common false-positive words to skip
 SKIP_WORDS = {
     "THE", "FOR", "AND", "BUT", "NOT", "YOU", "ALL", "CAN", "HAS", "ARE",
     "WAS", "HAD", "HIS", "HER", "ITS", "OUR", "OUT", "NOW", "GET", "SET",
@@ -50,39 +47,56 @@ SKIP_WORDS = {
     "INDIA", "INR", "USD", "GOOD", "GREAT", "NEXT", "WEEK", "MONTH", "YEAR",
     "TODAY", "DAILY", "WATCH", "LIST", "ALERT", "SIGNAL", "CALL", "PUT",
     "TREND", "BREAK", "MOVE", "HUGE", "MEGA", "MINI", "MICRO", "MID", "CAP",
+    "THIS", "WITH", "FROM", "THAT", "THEY", "BEEN", "WILL", "HAVE", "MORE",
 }
 
 
+# ── TICKER EXTRACTION ──────────────────────────────────────────────────────────
 def extract_tickers(text: str) -> Set[str]:
-    """Extract stock tickers from tweet text."""
     tickers = set()
-    # Priority: $TICKER mentions
     dollar_tickers = re.findall(r'\$([A-Z]{1,10})', text.upper())
     for t in dollar_tickers:
         if t not in SKIP_WORDS and len(t) >= 2:
             tickers.add(t)
-
-    # Also catch plain uppercase words if no $ tickers found
     if not dollar_tickers:
         plain = re.findall(r'(?<!\w)([A-Z]{2,10})(?!\w)', text.upper())
         for t in plain:
             if t not in SKIP_WORDS and len(t) >= 3:
                 tickers.add(t)
-
     return tickers
 
 
+# ── DATE PARSING ───────────────────────────────────────────────────────────────
+def parse_tweet_date(date_str: str) -> datetime | None:
+    """Parse Nitter date strings like 'Jun 25, 2024 · 10:30 AM UTC'"""
+    try:
+        # Remove the · and time portion, keep date
+        date_part = date_str.split("·")[0].strip()
+        return datetime.strptime(date_part, "%b %d, %Y")
+    except Exception:
+        return None
+
+
+def is_within_days(date_str: str, days: int) -> bool:
+    """Check if a tweet date string is within the last N days."""
+    dt = parse_tweet_date(date_str)
+    if dt is None:
+        return True  # If we can't parse, include it
+    cutoff = datetime.now() - timedelta(days=days)
+    return dt >= cutoff
+
+
 # ── NITTER SCRAPING ────────────────────────────────────────────────────────────
-def fetch_tweets_from_nitter(username: str) -> List[str]:
-    """Try each Nitter instance until one works."""
+def fetch_tweets_from_nitter(username: str, days_back: int) -> List[str]:
+    """Try each Nitter instance and filter tweets by date."""
     for base in NITTER_INSTANCES:
         url = f"{base}/{username}"
         try:
             resp = requests.get(url, headers=HEADERS, timeout=15)
             if resp.status_code == 200:
-                tweets = parse_nitter_html(resp.text)
-                if tweets:
-                    print(f"  ✓ Fetched @{username} from {base} ({len(tweets)} tweets)")
+                tweets = parse_nitter_html(resp.text, days_back)
+                if tweets is not None:
+                    print(f"  ✓ Fetched @{username} from {base} ({len(tweets)} tweets in last {days_back} days)")
                     return tweets
         except Exception as e:
             print(f"  ✗ {base} failed for @{username}: {e}")
@@ -91,32 +105,54 @@ def fetch_tweets_from_nitter(username: str) -> List[str]:
     return []
 
 
-def parse_nitter_html(html: str) -> List[str]:
-    """Extract tweet text from Nitter HTML (simple regex approach)."""
-    # Nitter wraps tweet content in <div class="tweet-content ...">
-    pattern = re.compile(
-        r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>',
-        re.DOTALL | re.IGNORECASE
+def parse_nitter_html(html: str, days_back: int) -> List[str] | None:
+    """Extract tweet text from Nitter HTML, filtered to last N days."""
+    # Extract tweet blocks (content + date together)
+    tweet_blocks = re.findall(
+        r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>.*?'
+        r'<span class="tweet-date"[^>]*>.*?title="([^"]*)"',
+        html, re.DOTALL | re.IGNORECASE
     )
-    raw_tweets = pattern.findall(html)
+
+    # Fallback: just get content without date filtering
+    if not tweet_blocks:
+        pattern = re.compile(
+            r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>',
+            re.DOTALL | re.IGNORECASE
+        )
+        raw_tweets = pattern.findall(html)
+        if not raw_tweets:
+            return None
+        cleaned = []
+        for raw in raw_tweets[:30]:
+            text = clean_html(raw)
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    # With date filtering
     cleaned = []
-    for raw in raw_tweets:
-        # Strip HTML tags
-        text = re.sub(r'<[^>]+>', ' ', raw)
-        text = re.sub(r'&amp;', '&', text)
-        text = re.sub(r'&lt;', '<', text)
-        text = re.sub(r'&gt;', '>', text)
-        text = re.sub(r'&#39;', "'", text)
-        text = re.sub(r'&quot;', '"', text)
-        text = ' '.join(text.split())
-        if text:
-            cleaned.append(text)
-    return cleaned[:20]  # Latest 20 tweets per account
+    for content, date_str in tweet_blocks:
+        if is_within_days(date_str, days_back):
+            text = clean_html(content)
+            if text:
+                cleaned.append(text)
+
+    return cleaned if cleaned else None
+
+
+def clean_html(raw: str) -> str:
+    text = re.sub(r'<[^>]+>', ' ', raw)
+    text = re.sub(r'&amp;', '&', text)
+    text = re.sub(r'&lt;', '<', text)
+    text = re.sub(r'&gt;', '>', text)
+    text = re.sub(r'&#39;', "'", text)
+    text = re.sub(r'&quot;', '"', text)
+    return ' '.join(text.split())
 
 
 # ── TELEGRAM ───────────────────────────────────────────────────────────────────
 def send_telegram(message: str):
-    """Send a message via Telegram Bot API."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -135,13 +171,17 @@ def send_telegram(message: str):
 def main():
     print(f"\n{'='*50}")
     print(f"🚀 Twitter Stock Scanner — {datetime.now().strftime('%d %b %Y %I:%M %p IST')}")
+    print(f"📅 Scanning last {DAYS_BACK} days")
     print(f"{'='*50}\n")
 
-    all_tickers: dict[str, Set[str]] = {}  # account → tickers
+    date_from = (datetime.now() - timedelta(days=DAYS_BACK)).strftime("%d %b")
+    date_to   = datetime.now().strftime("%d %b %Y")
+
+    all_tickers: dict[str, Set[str]] = {}
 
     for account in TWITTER_ACCOUNTS:
         print(f"📡 Scraping @{account}...")
-        tweets = fetch_tweets_from_nitter(account)
+        tweets = fetch_tweets_from_nitter(account, DAYS_BACK)
         tickers = set()
         for tweet in tweets:
             tickers |= extract_tickers(tweet)
@@ -150,10 +190,10 @@ def main():
         time.sleep(2)
 
     # Build Telegram message
-    date_str = datetime.now().strftime("%d %b %Y")
-    lines = [f"📊 <b>Daily Stock Picks — {date_str}</b>\n"]
+    period_label = f"Last {DAYS_BACK} Days ({date_from} – {date_to})" if DAYS_BACK > 1 else date_to
+    lines = [f"📊 <b>Stock Picks — {period_label}</b>\n"]
 
-    total_unique = set()
+    total_unique: Set[str] = set()
     has_any = False
 
     for account, tickers in all_tickers.items():
@@ -166,9 +206,9 @@ def main():
             lines.append("")
 
     if not has_any:
-        lines.append("⚠️ No tickers found today. Nitter may be down.")
+        lines.append(f"⚠️ No tickers found in last {DAYS_BACK} days. Nitter may be down.")
     else:
-        lines.append(f"─────────────────────")
+        lines.append("─────────────────────")
         lines.append(f"🔢 <b>Total unique: {len(total_unique)} tickers</b>")
         lines.append("  " + "  ".join(f"#{t}" for t in sorted(total_unique)))
         lines.append("")
@@ -179,9 +219,10 @@ def main():
     print(message)
     send_telegram(message)
 
-    # Save tickers to file for TradingView script
+    # Save for TradingView updater
     output = {
-        "date": date_str,
+        "date": date_to,
+        "days_back": DAYS_BACK,
         "by_account": {k: list(v) for k, v in all_tickers.items()},
         "all_tickers": sorted(total_unique),
     }
