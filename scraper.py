@@ -54,15 +54,33 @@ SKIP_WORDS = {
 # ── TICKER EXTRACTION ──────────────────────────────────────────────────────────
 def extract_tickers(text: str) -> Set[str]:
     tickers = set()
-    dollar_tickers = re.findall(r'\$([A-Z]{1,10})', text.upper())
+    upper = text.upper()
+
+    # ① $TICKER format — e.g. $RELIANCE
+    dollar_tickers = re.findall(r'\$([A-Z]{1,15})', upper)
     for t in dollar_tickers:
         if t not in SKIP_WORDS and len(t) >= 2:
             tickers.add(t)
-    if not dollar_tickers:
-        plain = re.findall(r'(?<!\w)([A-Z]{2,10})(?!\w)', text.upper())
+
+    # ② #TICKER format — e.g. #TALBROAUTO #SAREGAMA (stoxmee style)
+    hash_tickers = re.findall(r'#([A-Z]{2,15})', upper)
+    for t in hash_tickers:
+        if t not in SKIP_WORDS and len(t) >= 2:
+            tickers.add(t)
+
+    # ③ STOCKNAME : description format — e.g. "LALPATHLAB : Cup & Handle" (Sunil style)
+    colon_tickers = re.findall(r'(?<!\w)([A-Z]{3,15})\s*:', upper)
+    for t in colon_tickers:
+        if t not in SKIP_WORDS and len(t) >= 3:
+            tickers.add(t)
+
+    # ④ Fallback: plain uppercase words (only if nothing found yet)
+    if not tickers:
+        plain = re.findall(r'(?<!\w)([A-Z]{3,10})(?!\w)', upper)
         for t in plain:
             if t not in SKIP_WORDS and len(t) >= 3:
                 tickers.add(t)
+
     return tickers
 
 
