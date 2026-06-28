@@ -1,0 +1,54 @@
+name: 📊 Daily Stock Scanner
+
+on:
+  schedule:
+    # 6:00 AM IST = 00:30 UTC
+    - cron: '30 0 * * 1-5'   # Mon–Fri only (market days)
+  workflow_dispatch:           # Also allows manual trigger from GitHub UI
+
+jobs:
+  scan-and-notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── 1. Checkout repo ───────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Python ────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install dependencies ────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          pip install requests playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      # ── 4. Run scraper → sends Telegram + saves tickers_today.json ─────────
+      - name: Scrape Twitter & Send Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scraper.py
+
+      # ── 5. Update TradingView watchlist ────────────────────────────────────
+      - name: Update TradingView Watchlist
+        env:
+          TV_EMAIL: ${{ secrets.TV_EMAIL }}
+          TV_PASSWORD: ${{ secrets.TV_PASSWORD }}
+        run: python tradingview_updater.py
+
+      # ── 6. Save tickers as artifact (optional, for debugging) ──────────────
+      - name: Upload tickers log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tickers-${{ github.run_number }}
+          path: tickers_today.json
+          retention-days: 30
