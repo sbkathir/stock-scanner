@@ -2,7 +2,7 @@ import re
 import os
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Set
 import json
 
@@ -19,6 +19,13 @@ TWITTER_ACCOUNTS = [
     "chartistrj",
     "stoxmee",
     "chartnavigators",
+    "_chartwizard_",
+]
+
+TELEGRAM_CHANNELS = [
+    "Bschart1",
+    "TradeTheTrend_",
+    "ChartAddict007",
 ]
 
 NITTER_INSTANCES = [
@@ -159,14 +166,47 @@ def parse_nitter_html(html: str, days_back: int) -> List[str] | None:
     return cleaned if cleaned else None
 
 
-def clean_html(raw: str) -> str:
-    text = re.sub(r'<[^>]+>', ' ', raw)
-    text = re.sub(r'&amp;', '&', text)
-    text = re.sub(r'&lt;', '<', text)
-    text = re.sub(r'&gt;', '>', text)
-    text = re.sub(r'&#39;', "'", text)
-    text = re.sub(r'&quot;', '"', text)
-    return ' '.join(text.split())
+# ── TELEGRAM CHANNEL SCRAPING (public preview, no login needed) ────────────────
+def fetch_messages_from_telegram_channel(channel: str, days_back: int) -> List[str]:
+    """Scrape public posts from a Telegram channel via t.me/s/<channel>."""
+    url = f"https://t.me/s/{channel}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            print(f"  ✗ Failed to fetch t.me/s/{channel} (status {resp.status_code})")
+            return []
+        messages = parse_telegram_html(resp.text, days_back)
+        print(f"  ✓ Fetched t.me/{channel} ({len(messages)} messages in last {days_back} days)")
+        return messages
+    except Exception as e:
+        print(f"  ✗ Error fetching t.me/s/{channel}: {e}")
+        return []
+
+
+def parse_telegram_html(html: str, days_back: int) -> List[str]:
+    """Extract message text + datetime from a t.me/s/<channel> preview page."""
+    # Each message block: text + a <time datetime="...">
+    blocks = re.findall(
+        r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>.*?'
+        r'<time[^>]*datetime="([^"]*)"',
+        html, re.DOTALL | re.IGNORECASE
+    )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+    cleaned = []
+    for content, dt_str in blocks:
+        try:
+            # ISO format e.g. 2024-06-28T20:38:00+00:00
+            msg_dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        except Exception:
+            msg_dt = None
+
+        if msg_dt is None or msg_dt >= cutoff:
+            text = clean_html(content)
+            if text:
+                cleaned.append(text)
+
+    return cleaned
 
 
 # ── TELEGRAM ───────────────────────────────────────────────────────────────────
@@ -197,13 +237,25 @@ def main():
 
     all_tickers: dict[str, Set[str]] = {}
 
+    # ── Twitter/X accounts via Nitter ──────────────────────────────
     for account in TWITTER_ACCOUNTS:
-        print(f"📡 Scraping @{account}...")
+        print(f"📡 Scraping @{account} (Twitter)...")
         tweets = fetch_tweets_from_nitter(account, DAYS_BACK)
         tickers = set()
         for tweet in tweets:
             tickers |= extract_tickers(tweet)
-        all_tickers[account] = tickers
+        all_tickers[f"𝕏 @{account}"] = tickers
+        print(f"   Found tickers: {tickers or 'None'}\n")
+        time.sleep(2)
+
+    # ── Telegram channels ───────────────────────────────────────────
+    for channel in TELEGRAM_CHANNELS:
+        print(f"📡 Scraping t.me/{channel} (Telegram)...")
+        messages = fetch_messages_from_telegram_channel(channel, DAYS_BACK)
+        tickers = set()
+        for msg in messages:
+            tickers |= extract_tickers(msg)
+        all_tickers[f"✈️ t.me/{channel}"] = tickers
         print(f"   Found tickers: {tickers or 'None'}\n")
         time.sleep(2)
 
@@ -214,12 +266,12 @@ def main():
     total_unique: Set[str] = set()
     has_any = False
 
-    for account, tickers in all_tickers.items():
+    for source, tickers in all_tickers.items():
         if tickers:
             has_any = True
             sorted_tickers = sorted(tickers)
             total_unique |= tickers
-            lines.append(f"<b>@{account}</b>")
+            lines.append(f"<b>{source}</b>")
             lines.append("  " + "  |  ".join(f"#{t}" for t in sorted_tickers))
             lines.append("")
 
