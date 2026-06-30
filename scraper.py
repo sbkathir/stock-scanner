@@ -29,10 +29,14 @@ TELEGRAM_CHANNELS = [
 ]
 
 NITTER_INSTANCES = [
+    "https://xcancel.com",
     "https://nitter.poast.org",
+    "https://nitter.privacyredirect.com",
+    "https://lightbrd.com",
+    "https://nitter.space",
+    "https://nitter.tiekoetter.com",
+    "https://nitter.catsarch.com",
     "https://nitter.privacydev.net",
-    "https://nitter.1d4.us",
-    "https://nitter.kavin.rocks",
 ]
 
 HEADERS = {
@@ -40,7 +44,11 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 SKIP_WORDS = {
@@ -112,8 +120,10 @@ def is_within_days(date_str: str, days: int) -> bool:
 
 
 # ── NITTER SCRAPING ────────────────────────────────────────────────────────────
-def fetch_tweets_from_nitter(username: str, days_back: int) -> List[str]:
-    """Try each Nitter instance and filter tweets by date."""
+def fetch_tweets_from_nitter(username: str, days_back: int) -> tuple[List[str], str]:
+    """Try each Nitter instance and filter tweets by date.
+    Returns (tweets, status_note) where status_note explains failures."""
+    errors = []
     for base in NITTER_INSTANCES:
         url = f"{base}/{username}"
         try:
@@ -121,13 +131,18 @@ def fetch_tweets_from_nitter(username: str, days_back: int) -> List[str]:
             if resp.status_code == 200:
                 tweets = parse_nitter_html(resp.text, days_back)
                 if tweets is not None:
-                    print(f"  ✓ Fetched @{username} from {base} ({len(tweets)} tweets in last {days_back} days)")
-                    return tweets
+                    print(f"  ✓ {base} → {len(tweets)} tweets (last {days_back}d)")
+                    return tweets, "ok"
+                else:
+                    errors.append(f"{base}: 200 but no parseable tweets")
+            else:
+                errors.append(f"{base}: HTTP {resp.status_code}")
         except Exception as e:
-            print(f"  ✗ {base} failed for @{username}: {e}")
+            errors.append(f"{base}: {type(e).__name__}")
         time.sleep(1)
-    print(f"  ✗ All Nitter instances failed for @{username}")
-    return []
+    status = " | ".join(errors)
+    print(f"  ✗ ALL mirrors failed for @{username}: {status}")
+    return [], status
 
 
 def parse_nitter_html(html: str, days_back: int) -> List[str] | None:
@@ -167,20 +182,22 @@ def parse_nitter_html(html: str, days_back: int) -> List[str] | None:
 
 
 # ── TELEGRAM CHANNEL SCRAPING (public preview, no login needed) ────────────────
-def fetch_messages_from_telegram_channel(channel: str, days_back: int) -> List[str]:
+def fetch_messages_from_telegram_channel(channel: str, days_back: int) -> tuple[List[str], str]:
     """Scrape public posts from a Telegram channel via t.me/s/<channel>."""
     url = f"https://t.me/s/{channel}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
-            print(f"  ✗ Failed to fetch t.me/s/{channel} (status {resp.status_code})")
-            return []
+            note = f"HTTP {resp.status_code}"
+            print(f"  ✗ t.me/s/{channel} → {note}")
+            return [], note
         messages = parse_telegram_html(resp.text, days_back)
-        print(f"  ✓ Fetched t.me/{channel} ({len(messages)} messages in last {days_back} days)")
-        return messages
+        print(f"  ✓ t.me/{channel} → {len(messages)} messages (last {days_back}d)")
+        return messages, "ok"
     except Exception as e:
-        print(f"  ✗ Error fetching t.me/s/{channel}: {e}")
-        return []
+        note = f"{type(e).__name__}: {e}"
+        print(f"  ✗ t.me/s/{channel} → {note}")
+        return [], note
 
 
 def parse_telegram_html(html: str, days_back: int) -> List[str]:
@@ -236,26 +253,29 @@ def main():
     date_to   = datetime.now().strftime("%d %b %Y")
 
     all_tickers: dict[str, Set[str]] = {}
+    source_status: dict[str, str] = {}  # source → "ok" / error description
 
     # ── Twitter/X accounts via Nitter ──────────────────────────────
     for account in TWITTER_ACCOUNTS:
         print(f"📡 Scraping @{account} (Twitter)...")
-        tweets = fetch_tweets_from_nitter(account, DAYS_BACK)
+        tweets, status = fetch_tweets_from_nitter(account, DAYS_BACK)
         tickers = set()
         for tweet in tweets:
             tickers |= extract_tickers(tweet)
         all_tickers[f"𝕏 @{account}"] = tickers
+        source_status[f"𝕏 @{account}"] = status
         print(f"   Found tickers: {tickers or 'None'}\n")
         time.sleep(2)
 
     # ── Telegram channels ───────────────────────────────────────────
     for channel in TELEGRAM_CHANNELS:
         print(f"📡 Scraping t.me/{channel} (Telegram)...")
-        messages = fetch_messages_from_telegram_channel(channel, DAYS_BACK)
+        messages, status = fetch_messages_from_telegram_channel(channel, DAYS_BACK)
         tickers = set()
         for msg in messages:
             tickers |= extract_tickers(msg)
         all_tickers[f"✈️ t.me/{channel}"] = tickers
+        source_status[f"✈️ t.me/{channel}"] = status
         print(f"   Found tickers: {tickers or 'None'}\n")
         time.sleep(2)
 
@@ -276,7 +296,12 @@ def main():
             lines.append("")
 
     if not has_any:
-        lines.append(f"⚠️ No tickers found in last {DAYS_BACK} days. Nitter may be down.")
+        lines.append(f"⚠️ No tickers found in last {DAYS_BACK} days.\n")
+        lines.append("<b>Diagnostics:</b>")
+        for source, status in source_status.items():
+            icon = "✅" if status == "ok" else "❌"
+            short_status = status[:60] + ("…" if len(status) > 60 else "")
+            lines.append(f"{icon} {source}: {short_status}")
     else:
         lines.append("─────────────────────")
         lines.append(f"🔢 <b>Total unique: {len(total_unique)} tickers</b>")
