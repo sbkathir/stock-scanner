@@ -135,6 +135,11 @@ def fetch_tweets_from_nitter(username: str, days_back: int) -> tuple[List[str], 
                     return tweets, "ok"
                 else:
                     errors.append(f"{base}: 200 but no parseable tweets")
+                    # Debug: dump a snippet of the actual HTML so we can fix the regex
+                    if "DEBUG_HTML_DUMPED" not in globals():
+                        globals()["DEBUG_HTML_DUMPED"] = True
+                        snippet = resp.text[:3000]
+                        print(f"  🔍 DEBUG HTML SNIPPET from {base}:\n{snippet}\n")
             else:
                 errors.append(f"{base}: HTTP {resp.status_code}")
         except Exception as e:
@@ -224,6 +229,17 @@ def parse_telegram_html(html: str, days_back: int) -> List[str]:
                 cleaned.append(text)
 
     return cleaned
+
+
+def clean_html(raw: str) -> str:
+    """Strip HTML tags and decode common entities."""
+    text = re.sub(r'<[^>]+>', ' ', raw)
+    text = re.sub(r'&amp;', '&', text)
+    text = re.sub(r'&lt;', '<', text)
+    text = re.sub(r'&gt;', '>', text)
+    text = re.sub(r'&#39;', "'", text)
+    text = re.sub(r'&quot;', '"', text)
+    return ' '.join(text.split())
 
 
 # ── TELEGRAM ───────────────────────────────────────────────────────────────────
