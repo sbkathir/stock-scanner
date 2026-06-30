@@ -51,6 +51,29 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
+NSE_TICKER_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+
+# Loaded once at runtime — real NSE ticker symbols, used to validate candidates
+VALID_NSE_TICKERS: Set[str] = set()
+
+
+def load_nse_tickers() -> Set[str]:
+    """Download the official NSE equity list and return the set of valid symbols."""
+    try:
+        resp = requests.get(NSE_TICKER_LIST_URL, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        symbols = set()
+        lines = resp.text.splitlines()
+        for line in lines[1:]:  # skip header row "SYMBOL,NAME OF COMPANY,..."
+            parts = line.split(",")
+            if parts and parts[0].strip():
+                symbols.add(parts[0].strip().upper())
+        print(f"📋 Loaded {len(symbols)} valid NSE ticker symbols for validation")
+        return symbols
+    except Exception as e:
+        print(f"⚠️ Could not load NSE ticker list ({e}); falling back to unvalidated extraction")
+        return set()
+
 SKIP_WORDS = {
     "THE", "FOR", "AND", "BUT", "NOT", "YOU", "ALL", "CAN", "HAS", "ARE",
     "WAS", "HAD", "HIS", "HER", "ITS", "OUR", "OUT", "NOW", "GET", "SET",
@@ -68,33 +91,41 @@ SKIP_WORDS = {
 
 # ── TICKER EXTRACTION ──────────────────────────────────────────────────────────
 def extract_tickers(text: str) -> Set[str]:
-    tickers = set()
+    candidates = set()
     upper = text.upper()
 
     # ① $TICKER format — e.g. $RELIANCE
     dollar_tickers = re.findall(r'\$([A-Z]{1,15})', upper)
     for t in dollar_tickers:
         if t not in SKIP_WORDS and len(t) >= 2:
-            tickers.add(t)
+            candidates.add(t)
 
     # ② #TICKER format — e.g. #TALBROAUTO #SAREGAMA (stoxmee style)
     hash_tickers = re.findall(r'#([A-Z]{2,15})', upper)
     for t in hash_tickers:
         if t not in SKIP_WORDS and len(t) >= 2:
-            tickers.add(t)
+            candidates.add(t)
 
     # ③ STOCKNAME : description format — e.g. "LALPATHLAB : Cup & Handle" (Sunil style)
     colon_tickers = re.findall(r'(?<!\w)([A-Z]{3,15})\s*:', upper)
     for t in colon_tickers:
         if t not in SKIP_WORDS and len(t) >= 3:
-            tickers.add(t)
+            candidates.add(t)
 
     # ④ Fallback: plain uppercase words (only if nothing found yet)
-    if not tickers:
+    if not candidates:
         plain = re.findall(r'(?<!\w)([A-Z]{3,10})(?!\w)', upper)
         for t in plain:
             if t not in SKIP_WORDS and len(t) >= 3:
-                tickers.add(t)
+                candidates.add(t)
+
+    # ⑤ VALIDATE against real NSE ticker list, if loaded — this is what
+    #    actually filters out junk words like DISCLAIMER, TELEGRAM, BUYING etc.
+    if VALID_NSE_TICKERS:
+        tickers = {t for t in candidates if t in VALID_NSE_TICKERS}
+    else:
+        # NSE list failed to load this run — fall back to unvalidated (noisier)
+        tickers = candidates
 
     return tickers
 
@@ -260,10 +291,14 @@ def send_telegram(message: str):
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────
 def main():
+    global VALID_NSE_TICKERS
     print(f"\n{'='*50}")
     print(f"🚀 Twitter Stock Scanner — {datetime.now().strftime('%d %b %Y %I:%M %p IST')}")
     print(f"📅 Scanning last {DAYS_BACK} days")
     print(f"{'='*50}\n")
+
+    # Load real NSE ticker list FIRST so extraction can validate against it
+    VALID_NSE_TICKERS = load_nse_tickers()
 
     date_from = (datetime.now() - timedelta(days=DAYS_BACK)).strftime("%d %b")
     date_to   = datetime.now().strftime("%d %b %Y")
