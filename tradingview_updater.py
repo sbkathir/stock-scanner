@@ -58,21 +58,74 @@ def add_tickers_to_watchlist(tickers: list[str]):
         page.goto("https://www.tradingview.com/accounts/signin/", wait_until="networkidle")
         time.sleep(2)
 
-        # Click "Email" sign-in option
+        # Click "Email" sign-in option (modal toggle button)
         try:
             page.click("text=Email", timeout=8000)
             time.sleep(1)
         except PlaywrightTimeout:
             pass  # Already on email form
 
-        page.fill('input[name="username"]', TV_EMAIL)
-        page.fill('input[name="password"]', TV_PASSWORD)
+        # Try several possible selectors for the email/username field —
+        # TradingView's DOM structure changes periodically.
+        EMAIL_SELECTORS = [
+            'input[name="username"]',
+            'input[name="id_username"]',
+            'input[type="email"]',
+            '#id_username',
+            'input[placeholder*="mail" i]',
+            'input[data-qa-id="email-input"]',
+        ]
+        PASSWORD_SELECTORS = [
+            'input[name="password"]',
+            'input[type="password"]',
+            '#id_password',
+            'input[data-qa-id="password-input"]',
+        ]
+
+        def first_visible_selector(page, selectors, timeout=5000):
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel).first
+                    loc.wait_for(state="visible", timeout=timeout)
+                    return sel
+                except PlaywrightTimeout:
+                    continue
+            return None
+
+        email_sel = first_visible_selector(page, EMAIL_SELECTORS)
+        if not email_sel:
+            # Couldn't find the login field with any known selector —
+            # dump diagnostics so we can fix selectors with certainty next time
+            print("❌ Could not locate email/username field. Dumping diagnostics...")
+            os.makedirs("debug", exist_ok=True)
+            page.screenshot(path="debug/login_page.png", full_page=True)
+            with open("debug/login_page.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            print(f"   Current URL: {page.url}")
+            print("   Saved debug/login_page.png and debug/login_page.html")
+            browser.close()
+            sys.exit(1)
+
+        password_sel = first_visible_selector(page, PASSWORD_SELECTORS)
+        if not password_sel:
+            print("❌ Could not locate password field. Dumping diagnostics...")
+            os.makedirs("debug", exist_ok=True)
+            page.screenshot(path="debug/login_page.png", full_page=True)
+            with open("debug/login_page.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            browser.close()
+            sys.exit(1)
+
+        page.fill(email_sel, TV_EMAIL)
+        page.fill(password_sel, TV_PASSWORD)
         page.click('button[type="submit"]')
         time.sleep(5)
 
         # Check login success
         if "signin" in page.url:
-            print("❌ Login failed. Check credentials.")
+            print("❌ Login failed. Check credentials or 2FA may be required.")
+            os.makedirs("debug", exist_ok=True)
+            page.screenshot(path="debug/login_failed.png", full_page=True)
             browser.close()
             sys.exit(1)
         print("✅ Logged in!")
